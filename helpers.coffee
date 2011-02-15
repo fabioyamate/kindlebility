@@ -4,45 +4,26 @@ Sys = require('sys')
 Query = require('querystring')
 Readability = require('./readability/lib/readability')
 Spawn = require('child_process').spawn
-Request = require('./request/main')
+Request = require('request')
 Promise = require('./promised-io/lib/promise')
 Config = JSON.parse(Fs.readFileSync('config.json', 'utf8'))
 Postmark = 'http://api.postmarkapp.com/email'
 UserAgent = "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_5; en-US) AppleWebKit/534.10 (KHTML, like Gecko) Chrome/8.0.552.215 Safari/534.10"
+Mysql = require('mysql').Client
+mysql = new Mysql
+
+mysql.user = 'root'
+mysql.password = ''
 
 error = (client, msg) ->
   Sys.puts("ERROR: #{msg}")
   client.send(msg)
   client.send('done')
 
-formatProgress = (step, msg) ->
-  "#{step}/6 #{msg}..."
-
-formatProgressDone = (step, msg) ->
-  "#{formatProgress(step, msg)}Done!"
-
-templatize = (step, msg, func) ->
-  (args) ->
-    client = args.client
-    client.send(formatProgress(step, msg))
-    defer = new Promise.defer()
-    success = (obj) ->
-      obj['client'] = client
-      client.send(formatProgressDone(step, msg))
-      defer.resolve(obj)
-    fail = (msg) ->
-      error(client, msg)
-      defer.reject(msg)
-    try
-      func(args, success, fail)
-    catch e
-      Hoptoad.notify(e)
-      msg = 'An error occurred.'
-      error(client, msg)
-      defer.reject(msg)
-    defer
-
-RetrievePage = templatize 1, 'Retrieving page', (args, success, fail) ->
+RetrievePage = (args) ->
+  client = args.client
+  client.send('Retrieving page...')
+  defer = new Promise.defer()
   options = {
     uri: args.url,
     headers: {
@@ -51,102 +32,51 @@ RetrievePage = templatize 1, 'Retrieving page', (args, success, fail) ->
   }
   Request options, (err, response, body) ->
     if err?
-      fail('Failed to retrieve page.')
+      msg = 'Failed to retrieve page.'
+      error(client, msg)
+      defer.reject(msg)
     else
-      success({
+      defer.resolve({
+        client: client,
         response: response,
         body: body,
         url: args.url,
         to: args.to
       })
+  defer
 
-RunReadability = templatize 2, 'Running Readability', (args, success, fail) ->
+RunReadability = (args) ->
+  client = args.client
+  client.send('Processing...')
+  defer = new Promise.defer()
+  console.log(args.response.headers)
   Readability.parse args.body, args.url, (result) ->
     if result.error
-      fail('Failed running Readability')
+      msg = 'Failed running Readability'
+      error(client, msg)
+      defer.reject(msg)
     else
-      success({
+      console.log(result);
+      defer.resolve({
+        client: client,
         url: args.url,
         result: result,
-        to: args.to
-      })
-
-WriteFile = templatize 3, 'Writing HTML', (args, success, fail) ->
-  filename = Hash.sha1(args.url)
-  Fs.writeFile "#{filename}.html", args.result.content, (err) ->
-    if err?
-      fail('Error saving Readability HTML')
-    else
-      success({
-        filename: filename,
-        url: args.url,
-        title: args.result.title,
-        to: args.to
-      })
-
-WebkitHtmlToPdf = templatize 4, 'Running wkhtmltopdf', (args, success, fail) ->
-  filename = args.filename
-  wkhtmltopdf = Spawn('wkhtmltopdf', ['--page-size', 'letter', '--encoding', 'utf-8', "#{filename}.html", "#{filename}.pdf"])
-  wkhtmltopdf.on 'exit', (code) ->
-    if 0 != code
-      fail("Error running wkhtmltopdf. (#{code})")
-    else
-      success({
-        filename: filename,
-        url: args.url,
-        title: args.title,
-        to: args.to
-      })
-
-ReadFile = templatize 5, 'Reading PDF', (args, success, fail) ->
-  Fs.readFile "#{args.filename}.pdf", 'base64', (err, data) ->
-    if err?
-      fail("Error reading PDF.")
-    else
-      success({
         to: args.to,
-        url: args.url,
-        title: args.title,
-        data: data,
-        filename: args.filename
+        content_type: args.response.headers['content-type']
       })
+  defer
 
-SendEmail = templatize 6, 'Sending email', (args, success, fail) ->
-  requestBody = JSON.stringify({
-    From: Config.email.from,
-    To: args.to,
-    Subject: 'convert',
-    TextBody: "Straight to your Kindle: #{args.url}",
-    Attachments: [{
-      # Force tto ASCII otherwise Postmark doesn't like it
-      Name: unescape(encodeURIComponent("#{args.title}.pdf")),
-      Content: args.data,
-      ContentType: 'application/pdf'
-    }]
-  })
-  Request {
-    uri: Postmark,
-    method: 'POST',
-    body: requestBody,
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'X-Postmark-Server-Token': Config.postmark
-    }
-  }, (err, response, body) ->
-    switch response.statusCode
-      when 401
-        fail('Server configuration error.')
-      when 422
-        fail('Error sending email (malformed request).')
-      when 200
-        success({})
-        args.client.send('done')
-        Sys.puts("Everything went smoothly.")
-      else
-        fail('Error sending email (other).')
-    Fs.unlink("#{args.filename}.pdf")
-    Fs.unlink("#{args.filename}.html")
+Saving = (args) ->
+  client = args.client
+  client.send('Saving...')
+  defer = new Promise.defer()
+  filename = Hash.sha1(args.url)
+  mysql.connect()
+  mysql.query('USE magaziner_development')
+  mysql.query("INSERT INTO articles SET title = ?, content = ?, url = ?", [args.result.title, args.result.content, args.url])
+
+  client.send('done')
+  Sys.puts("Everything went smoothly.")
 
 exports.verifyParams = (req) ->
   url = Url.parse(req.url)
@@ -166,9 +96,6 @@ exports.processSocketIO = (args) ->
     [
       RetrievePage,
       RunReadability,
-      WriteFile,
-      WebkitHtmlToPdf,
-      ReadFile,
-      SendEmail
+      Saving
     ]
   Promise.seq(sequence, args)

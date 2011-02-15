@@ -2,7 +2,6 @@ require('joose')
 require('joosex-namespace-depended')
 require('hash')
 Fs = require('fs')
-Sys = require('sys')
 Config = JSON.parse(Fs.readFileSync('config.json', 'utf8'))
 Http = require('http')
 Express = require('express')
@@ -10,18 +9,6 @@ IO = require('socket.io')
 Jade = require('jade')
 Helpers = require('./helpers')
 Host = if process.env.NODE_ENV == 'production' then 'kindlebility.darkhax.com' else 'localhost:9090'
-
-Fs.writeFileSync('node.pid', process.pid.toString())
-
-Hoptoad = require('hoptoad-notifier').Hoptoad
-Hoptoad.key = Config.hoptoad
-process.on 'uncaughtException', (error) ->
-  if process.env.NODE_ENV == 'production'
-    Hoptoad.notify error, ->
-      # Let's exit, since we're not entirely sure what state the app might be in
-      process.exit(0)
-  else
-    Sys.puts(error)
 
 app = Express.createServer()
 
@@ -58,3 +45,4 @@ socket.on 'connection', (client) ->
     json = JSON.parse(data)
     json['client'] = client
     Helpers.processSocketIO(json)
+
